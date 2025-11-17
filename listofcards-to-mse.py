@@ -7,6 +7,22 @@ Script Python autonome (sans Ruby) qui :
 - lit un fichier texte de type "Moxfield" (liste de cartes),
 - télécharge les données de cartes via l'API Scryfall (en essayant d'utiliser la version FR si elle existe),
 - génère un set .mse-set (zip) pour Magic Set Editor (MSE), jeu "magic", template M15.
+
+Format d'entrée attendu (exemple) :
+    1 Anafenza, the Foremost (KTK) 163 *F*
+    1 Anguished Unmaking (LTC) 265
+
+Les champs entre parenthèses (code d'édition), numéro de collector et flags (*F*, etc.)
+sont utilisés pour cibler set/collector, seul le nom est utilisé si ces infos manquent.
+
+Limitations :
+- Ne gère que le jeu "magic" (standard),
+- Ne gère pas Planechase, Archenemy, Vanguard, etc.,
+- Ne gère pas les tokens,
+- Ne gère pas les cartes "uncards" (silver border) sauf option explicite.
+
+Dépendances Python :
+    pip install pillow piexif regex requests
 """
 
 import sys
@@ -125,6 +141,9 @@ class ScryfallCard:
     original_collector_number: Optional[str] = None
     original_lang: Optional[str] = None
 
+    # Clé de cache dérivée de la ligne Moxfield
+    cache_key: Optional[str] = None
+
 
 def _build_scryfall_card_from_json(data: Dict) -> ScryfallCard:
     """Construit un ScryfallCard à partir du JSON brut Scryfall, en gérant les MDFC."""
@@ -157,7 +176,7 @@ def _build_scryfall_card_from_json(data: Dict) -> ScryfallCard:
 
     return ScryfallCard(
         name=data["name"],
-        layout=layout,
+        layout=data.get("layout", "normal"),
         colors=data.get("colors", []),
         color_identity=data.get("color_identity", []),
         type_line=type_line,
@@ -195,24 +214,26 @@ def _search_one_card(query: str) -> Optional[Dict]:
 def fetch_printing(set_code: Optional[str],
                    collector_number: Optional[str],
                    name: str,
-                   preferred_lang: str = "fr") -> ScryfallCard:
+                   preferred_lang: str,
+                   cache_key: str) -> ScryfallCard:
     """
     Récupère une carte en préférant :
     1. L'impression set/number en preferred_lang,
     2. Sinon l'impression set/number en anglais,
     3. Sinon une impression FR (toutes éditions) par nom,
-    4. Sinon une impression EN par nom.
+    4. Sinon une impression EN par nom,
+    5. Sinon named?exact=Nom.
     """
     original_set = set_code.upper() if set_code else None
     original_num = collector_number
     original_lang = preferred_lang
 
-    # Helper pour construire un ScryfallCard + renseigner original_*
     def make_card_from_data(data: Dict) -> ScryfallCard:
         card = _build_scryfall_card_from_json(data)
         card.original_set = original_set
         card.original_collector_number = original_num
         card.original_lang = original_lang
+        card.cache_key = cache_key
         return card
 
     # 1. Impression exacte set/number en FR puis EN
@@ -225,7 +246,9 @@ def fetch_printing(set_code: Optional[str],
             q = f"set:{set_q} number:{num_q} lang:{preferred_lang}"
             data = _search_one_card(q)
             if data is not None:
-                return make_card_from_data(data)
+                card = make_card_from_data(data)
+                card.lang = data.get("lang", preferred_lang)
+                return card
         except requests.HTTPError:
             pass
 
@@ -263,14 +286,12 @@ def fetch_printing(set_code: Optional[str],
         pass
 
     # 4. Fallback ultime : named?exact=Nom (langue par défaut)
-    try:
-        card = fetch_card_from_scryfall_raw_by_name(name)
-        card.original_set = original_set
-        card.original_collector_number = original_num
-        card.original_lang = original_lang
-        return card
-    except requests.HTTPError as e:
-        raise
+    card = fetch_card_from_scryfall_raw_by_name(name)
+    card.original_set = original_set
+    card.original_collector_number = original_num
+    card.original_lang = original_lang
+    card.cache_key = cache_key
+    return card
 
 
 # ---------------------------------------------------------------------------
@@ -548,9 +569,19 @@ class MSEDataFile:
 # Conversion Scryfall -> MSE card
 # ---------------------------------------------------------------------------
 
-def normalize_image_name(card: ScryfallCard) -> str:
-    # on base le nom de fichier sur set / collector_number / langue
-    base = f"{card.set.lower()}_{card.collector_number or 'no-num'}_{card.lang}"
+def build_image_cache_name(card: ScryfallCard) -> str:
+    """
+    Construit un nom de fichier stable pour le cache d'images.
+
+    Priorité :
+    - cache_key (dérivé de la ligne Moxfield),
+    - sinon set/collector/lang,
+    - sinon nom de carte.
+    """
+    if card.cache_key:
+        base = f"{card.cache_key}_{card.lang}"
+    else:
+        base = f"{card.set.lower()}_{card.collector_number or 'no-num'}_{card.lang}"
     return base.replace(":", "").replace('"', "").replace("?", "")
 
 
@@ -565,18 +596,21 @@ def save_card_art(card: ScryfallCard, images_dir: Optional[str]) -> Tuple[Option
     if card.image_uris:
         img_url = card.image_uris.get("art_crop") or card.image_uris.get("normal") or card.image_uris.get("large")
 
-    image_filename = f"{normalize_image_name(card)}.jpg"
+    image_filename = f"{build_image_cache_name(card)}.jpg"
     image_path = os.path.join(images_dir, image_filename)
 
     if os.path.exists(image_path):
-        # Utilisation du cache
+        # Utilisation du cache si possible
         try:
             with PIL.Image.open(image_path) as img:
                 image_is_vertical = img.size[1] > img.size[0]
             return image_path, image_is_vertical, card.artist
-        except OSError:
-            # Fichier corrompu, on retente le téléchargement
-            pass
+        except Exception:
+            # Si le fichier est illisible, on le supprime et on retélécharge
+            try:
+                os.remove(image_path)
+            except OSError:
+                pass
 
     if not img_url:
         return None, False, card.artist
@@ -882,6 +916,15 @@ class CardEntry:
     set_code: Optional[str] = None
     collector_number: Optional[str] = None
 
+    @property
+    def cache_key(self) -> str:
+        """Clé de cache stable dérivée de la ligne Moxfield."""
+        set_part = (self.set_code or "no-set").upper()
+        cn_part = self.collector_number or "no-num"
+        # nom simplifié (sans espaces, caractères spéciaux)
+        name_norm = re.sub(r"[^A-Za-z0-9]+", "_", self.name.strip())
+        return f"{set_part}_{cn_part}_{name_norm}"
+
 
 def parse_moxfield_file(path: str) -> List[CardEntry]:
     entries: List[CardEntry] = []
@@ -1110,7 +1153,13 @@ def main(argv=None):
             )
         for _ in range(entry.count):
             try:
-                card = fetch_printing(entry.set_code, entry.collector_number, entry.name, preferred_lang="fr")
+                card = fetch_printing(
+                    entry.set_code,
+                    entry.collector_number,
+                    entry.name,
+                    preferred_lang="fr",
+                    cache_key=entry.cache_key,
+                )
                 build_mse_card(
                     card,
                     set_file,
