@@ -21,15 +21,12 @@ Limitations :
 - Ne gère pas les tokens,
 - Ne gère pas les cartes "uncards" (silver border) sauf option explicite.
 
-Dépendances Python :
-    pip install pillow piexif regex requests
-
-(Le module mtgjson n'est plus utilisé, tout passe par Scryfall.)
+Installation des dépendances Python :
+$ pip install pillow piexif regex requests
 """
 
 import sys
 import argparse
-import contextlib
 import datetime
 import enum
 import io
@@ -84,14 +81,12 @@ IMAGE_FILE_EXTS = [".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"]
 
 class UncardError(ValueError):
     """Erreur levée pour les Un-cards si non autorisées."""
-
     pass
 
 
 # ---------------------------------------------------------------------------
 # Utilitaires Scryfall
 # ---------------------------------------------------------------------------
-
 
 def scryfall_request(url: str, *, params: Optional[Dict] = None) -> requests.Response:
     """Appelle Scryfall en respectant un rate-limit simple global."""
@@ -111,7 +106,6 @@ def scryfall_request(url: str, *, params: Optional[Dict] = None) -> requests.Res
 @dataclass
 class CardFaceData:
     """Données structurées d'une face de carte, issues de Scryfall."""
-
     name: str
     mana_cost: str
     type_line: str
@@ -124,7 +118,6 @@ class CardFaceData:
 @dataclass
 class ScryfallCard:
     """Données structurées d'une carte Scryfall."""
-
     name: str
     layout: str
     colors: List[str]
@@ -143,25 +136,15 @@ class ScryfallCard:
     lang: str = "en"
 
 
-def fetch_card_from_scryfall_raw(name: str) -> ScryfallCard:
-    """Récupère une carte Scryfall (langue par défaut, 'named?exact=')."""
-
-    resp = scryfall_request(SCRYFALL_API_NAMED, params={"exact": name})
-    data = resp.json()
-
-    # Collecter tous les printings pour le calcul de la rareté min
-    prints = []
-    if data.get("prints_search_uri"):
-        prints_resp = scryfall_request(data["prints_search_uri"])
-        prints = prints_resp.json().get("data", [])
-
+def _build_scryfall_card_from_json(data: Dict) -> ScryfallCard:
+    """Construit un ScryfallCard à partir du JSON brut Scryfall, en gérant les MDFC."""
     layout = data.get("layout", "normal")
     card_faces: List[CardFaceData] = []
     if "card_faces" in data:
         for face in data["card_faces"]:
             card_faces.append(
                 CardFaceData(
-                    name=face.get("name", data["name"]),
+                    name=face.get("name", data.get("name", "")),
                     mana_cost=face.get("mana_cost") or "",
                     type_line=face.get("type_line") or "",
                     oracle_text=face.get("oracle_text") or "",
@@ -171,14 +154,26 @@ def fetch_card_from_scryfall_raw(name: str) -> ScryfallCard:
                 )
             )
 
+    # Pour beaucoup de MDFC, type_line/oracle_text/mana_cost sont sur les faces, pas à la racine.
+    type_line = data.get("type_line") or (card_faces[0].type_line if card_faces else "")
+    oracle_text = data.get("oracle_text") or (card_faces[0].oracle_text if card_faces else "")
+    mana_cost = data.get("mana_cost") or (card_faces[0].mana_cost if card_faces else "")
+
+    # Collecter tous les printings pour le calcul de la rareté min
+    prints = []
+    if data.get("prints_search_uri"):
+        # on ne gère qu'une page ; pour la rareté minimale c'est suffisant dans la plupart des cas
+        prints_resp = scryfall_request(data["prints_search_uri"])
+        prints = prints_resp.json().get("data", [])
+
     return ScryfallCard(
         name=data["name"],
         layout=layout,
         colors=data.get("colors", []),
         color_identity=data.get("color_identity", []),
-        type_line=data.get("type_line", "") or "",
-        oracle_text=data.get("oracle_text", "") or "",
-        mana_cost=data.get("mana_cost") or "",
+        type_line=type_line,
+        oracle_text=oracle_text,
+        mana_cost=mana_cost,
         rarity=data.get("rarity", "common").capitalize(),
         set=data.get("set", "").upper(),
         collector_number=data.get("collector_number", "") or "",
@@ -191,15 +186,21 @@ def fetch_card_from_scryfall_raw(name: str) -> ScryfallCard:
     )
 
 
+def fetch_card_from_scryfall_raw(name: str) -> ScryfallCard:
+    """Récupère une carte Scryfall (langue par défaut, 'named?exact=')."""
+    resp = scryfall_request(SCRYFALL_API_NAMED, params={"exact": name})
+    data = resp.json()
+    return _build_scryfall_card_from_json(data)
+
+
 def fetch_card_from_scryfall(name: str, preferred_lang: str = "fr") -> ScryfallCard:
     """
     Récupère une carte depuis Scryfall, en préférant une impression dans la langue donnée
     (par exemple 'fr') si elle existe pour la même combinaison (set, collector_number).
     """
-
     # Étape 1 : impression de référence (souvent en anglais)
     base = fetch_card_from_scryfall_raw(name)
-    base_set = base.set.lower()  # Scryfall utilise les codes de set en minuscules dans les requêtes
+    base_set = base.set.lower()
     base_num = base.collector_number
 
     # Si pas de set/numéro ou pas de langue préférée, on ne peut pas cibler une impression précise
@@ -207,7 +208,6 @@ def fetch_card_from_scryfall(name: str, preferred_lang: str = "fr") -> ScryfallC
         return base
 
     # Étape 2 : chercher une version dans la langue préférée
-    # Exemple : q=set:eoc number:120 lang:fr
     query = f"set:{base_set} number:{base_num} lang:{preferred_lang}"
     search_url = "https://api.scryfall.com/cards/search"
     try:
@@ -222,46 +222,29 @@ def fetch_card_from_scryfall(name: str, preferred_lang: str = "fr") -> ScryfallC
         if not fr_data:
             return base  # pas d’impression FR : on garde la VO
 
-        # Récupérer les prints à partir de l’impression FR (pour la rareté minimale)
-        prints = []
-        if fr_data.get("prints_search_uri"):
-            prints_resp = scryfall_request(fr_data["prints_search_uri"])
-            prints = prints_resp.json().get("data", [])
+        fr_card = _build_scryfall_card_from_json(fr_data)
 
-        layout = fr_data.get("layout", "normal")
-        card_faces: List[CardFaceData] = []
-        if "card_faces" in fr_data:
-            for face in fr_data["card_faces"]:
-                card_faces.append(
-                    CardFaceData(
-                        name=face.get("name", fr_data["name"]),
-                        mana_cost=face.get("mana_cost") or "",
-                        type_line=face.get("type_line") or "",
-                        oracle_text=face.get("oracle_text") or "",
-                        power=face.get("power"),
-                        toughness=face.get("toughness"),
-                        loyalty=face.get("loyalty"),
-                    )
-                )
+        # Fusion prudente : si certains champs sont vides en FR, on reprend ceux de base
+        if not fr_card.colors:
+            fr_card.colors = base.colors
+        if not fr_card.color_identity:
+            fr_card.color_identity = base.color_identity
+        if not fr_card.type_line:
+            fr_card.type_line = base.type_line
+        if not fr_card.oracle_text:
+            fr_card.oracle_text = base.oracle_text
+        if not fr_card.mana_cost:
+            fr_card.mana_cost = base.mana_cost
+        if not fr_card.image_uris and base.image_uris:
+            fr_card.image_uris = base.image_uris
+        if not fr_card.card_faces and base.card_faces:
+            fr_card.card_faces = base.card_faces
 
-        return ScryfallCard(
-            name=fr_data["name"],
-            layout=layout,
-            colors=fr_data.get("colors", []) or base.colors,
-            color_identity=fr_data.get("color_identity", []) or base.color_identity,
-            type_line=fr_data.get("type_line", "") or base.type_line,
-            oracle_text=fr_data.get("oracle_text", "") or base.oracle_text,
-            mana_cost=fr_data.get("mana_cost") or base.mana_cost,
-            rarity=fr_data.get("rarity", base.rarity).capitalize(),
-            set=fr_data.get("set", base.set).upper(),
-            collector_number=fr_data.get("collector_number", base.collector_number) or "",
-            artist=fr_data.get("artist") or base.artist,
-            border_color=fr_data.get("border_color", base.border_color),
-            image_uris=fr_data.get("image_uris") or base.image_uris,
-            card_faces=card_faces if card_faces else base.card_faces,
-            all_prints=prints if prints else base.all_prints,
-            lang=fr_data.get("lang", preferred_lang),
-        )
+        # Recalcul des prints pour la rareté minimal, sinon on reprend ceux de base
+        if not fr_card.all_prints and base.all_prints:
+            fr_card.all_prints = base.all_prints
+
+        return fr_card
     except requests.HTTPError:
         # En cas de problème lors de la recherche FR, on garde la version de base
         return base
@@ -271,17 +254,10 @@ def fetch_card_from_scryfall(name: str, preferred_lang: str = "fr") -> ScryfallC
 # Conversion coût de mana / couleurs implicites
 # ---------------------------------------------------------------------------
 
-
 def cost_to_mse(cost: str, *, normalize: bool = False) -> str:
-    """Convertit un coût de mana Scryfall en string MSE.
-
-    On reprend l'esprit du script original, en corrigeant / simplifiant
-    pour un contexte Scryfall.
-    """
-
+    """Convertit un coût de mana Scryfall en string MSE."""
     def cost_part_to_mse(part: str) -> str:
         basics = "[WUBRG]"
-        # part est de la forme 'W', 'U', '2/W', 'W/U', 'X', '3', etc.
         if regex.fullmatch(basics, part):
             return part
         if part in ("C", "E", "Q", "S", "T", "X"):
@@ -304,7 +280,6 @@ def cost_to_mse(cost: str, *, normalize: bool = False) -> str:
     if not cost:
         return ""
     if cost[0] != "{" or cost[-1] != "}":
-        # Scryfall garantit normalement ce format, sinon on tolère et retourne brut
         if "{" not in cost:
             return cost
         raise ValueError("Cost must start with { and end with }")
@@ -313,7 +288,6 @@ def cost_to_mse(cost: str, *, normalize: bool = False) -> str:
     if not normalize:
         return "".join(cost_part_to_mse(p) for p in parts)
 
-    # Normalisation : même logique que le script original, simplifiée.
     result = ""
     remaining = list(parts)
 
@@ -357,16 +331,8 @@ def cost_to_mse(cost: str, *, normalize: bool = False) -> str:
 
     # hybrides
     hybrid_order = [
-        "W/U",
-        "U/B",
-        "B/R",
-        "R/G",
-        "G/W",
-        "W/B",
-        "U/R",
-        "B/G",
-        "R/W",
-        "G/U",
+        "W/U", "U/B", "B/R", "R/G", "G/W",
+        "W/B", "U/R", "B/G", "R/W", "G/U",
     ]
     for sym in hybrid_order:
         for i in reversed(range(len(remaining))):
@@ -386,8 +352,7 @@ def cost_to_mse(cost: str, *, normalize: bool = False) -> str:
 
 
 def implicit_colors(cost: str, short: bool = False) -> List[str]:
-    """Couleurs implicites à partir du coût (comme dans l'original, corrigé)."""
-
+    """Couleurs implicites à partir du coût."""
     def cost_part_colors(part: str) -> Set[str]:
         basics = "[WUBRG]"
         if regex.fullmatch(basics, part):
@@ -403,7 +368,6 @@ def implicit_colors(cost: str, short: bool = False) -> List[str]:
         match = regex.fullmatch(r"2/([WUBRG])", part)
         if match:
             return {COLOR_ABBREVIATIONS[match.group(1)]}
-        # autres symboles : ignorés
         return set()
 
     if not cost:
@@ -423,13 +387,7 @@ def implicit_colors(cost: str, short: bool = False) -> List[str]:
         if color in colors:
             if short:
                 ordered.append(
-                    {
-                        "White": "W",
-                        "Blue": "U",
-                        "Black": "B",
-                        "Red": "R",
-                        "Green": "G",
-                    }[color]
+                    {"White": "W", "Blue": "U", "Black": "B", "Red": "R", "Green": "G"}[color]
                 )
             else:
                 ordered.append(color)
@@ -439,7 +397,6 @@ def implicit_colors(cost: str, short: bool = False) -> List[str]:
 # ---------------------------------------------------------------------------
 # Enum de rareté (MSE)
 # ---------------------------------------------------------------------------
-
 
 class OrderedEnum(enum.Enum):
     def __ge__(self, other):
@@ -476,7 +433,6 @@ class Rarity(OrderedEnum):
 
     @classmethod
     def from_scryfall_str(cls, rarity_str: str) -> "Rarity":
-        # Scryfall: "common", "uncommon", "rare", "mythic"
         mapping = {
             "basic": cls.BASIC,
             "common": cls.COMMON,
@@ -492,7 +448,6 @@ class Rarity(OrderedEnum):
 # ---------------------------------------------------------------------------
 # MSEDataFile : structure de données MSE
 # ---------------------------------------------------------------------------
-
 
 class MSEDataFile:
     def __init__(self, data: Optional[Dict] = None):
@@ -570,7 +525,6 @@ class MSEDataFile:
 # Conversion Scryfall -> MSE card
 # ---------------------------------------------------------------------------
 
-
 def normalize_image_name(card_name: str) -> str:
     return card_name.replace(":", "").replace('"', "").replace("?", "")
 
@@ -583,15 +537,8 @@ def save_card_art(card: ScryfallCard, images_dir: Optional[str]) -> Tuple[Option
     os.makedirs(images_dir, exist_ok=True)
 
     img_url = None
-
-    # Cas simple : image_uris au niveau racine
     if card.image_uris:
         img_url = card.image_uris.get("art_crop") or card.image_uris.get("normal") or card.image_uris.get("large")
-    else:
-        # double-faced / modal / etc.
-        # Scryfall fournit généralement image_uris par face, mais on n'y a pas accès
-        # dans cette structure simplifiée => pas d'image dans ce cas.
-        pass
 
     if not img_url:
         return None, False, card.artist
@@ -636,12 +583,16 @@ def build_mse_card(
 
     result = MSEDataFile()
 
+    # Face principale (pour MDFC / transform : on prend la première face)
+    main_face = card.card_faces[0] if card.card_faces else None
+
     # nom
     result["name"] = card.name
 
     # coût de mana
-    if card.mana_cost:
-        result["casting cost"] = cost_to_mse(card.mana_cost, normalize=new_wedge_order)
+    mana_cost = card.mana_cost or (main_face.mana_cost if main_face else "")
+    if mana_cost:
+        result["casting cost"] = cost_to_mse(mana_cost, normalize=new_wedge_order)
 
     # image
     image_path, image_is_vertical, artist = save_card_art(card, images_dir)
@@ -651,11 +602,10 @@ def build_mse_card(
     if artist:
         result["illustrator"] = artist
 
-    # couleurs / frame color & indicator
+    # couleurs / frame color & indicator (basé sur card.colors)
     frame_color_parts: List[str] = []
     if not card.colors:
-        # colorless
-        if "Artifact" not in card.type_line:
+        if "Artifact" not in (card.type_line or ""):
             frame_color_parts.append("colorless")
     elif len(card.colors) > 2:
         frame_color_parts.append("multicolor")
@@ -669,7 +619,6 @@ def build_mse_card(
 
     if "Land" in card.type_line:
         if not card.colors:
-            # couleurs implicites par oracle_text / basic types
             land_colors = [c.lower() for c in could_produce_from_text(card) if c != "Colorless"]
             if len(land_colors) > 2:
                 frame_color = "multicolor, land"
@@ -685,13 +634,11 @@ def build_mse_card(
             result["has styling"] = True
             result["styling data"] = {"color indicator dot": "yes"}
     else:
-        # non-land
-        implicit = implicit_colors(card.mana_cost)
+        implicit = implicit_colors(mana_cost)
         if set(card.colors) != set(implicit):
             if not card.colors:
-                # devoid / colorless with colored mana in cost
                 result["card color"] = ", ".join(
-                    c.lower() for c in implicit_colors(card.mana_cost, short=False)
+                    c.lower() for c in implicit_colors(mana_cost, short=False)
                 ) or ", ".join(frame_color_parts)
             else:
                 result["card color"] = ", ".join(frame_color_parts)
@@ -702,15 +649,12 @@ def build_mse_card(
             if not card.colors and image_is_vertical and not any(
                 t in card.type_line for t in ["Artifact", "Land", "Phenomenon", "Plane", "Scheme", "Vanguard"]
             ):
-                # true colorless (ex: Kozilek)
                 pass
             if frame_color_parts:
                 result["card color"] = ", ".join(frame_color_parts)
 
     # type line
-    # Scryfall type_line: "Legendary Creature — Human Warrior"
-    type_line = card.type_line
-    # on extrait supertypes/types/subtypes
+    type_line = card.type_line or (main_face.type_line if main_face else "")
     super_types: List[str] = []
     types: List[str] = []
     sub_types: List[str] = []
@@ -722,10 +666,9 @@ def build_mse_card(
         left = type_line
 
     for part in left.split(" "):
-        # heuristique simple
         if part in ("Basic", "Legendary", "Snow", "World", "Ongoing"):
             super_types.append(part)
-        else:
+        elif part:
             types.append(part)
 
     if super_types:
@@ -748,14 +691,12 @@ def build_mse_card(
     # rareté : minimal sur tous les printings
     rarity_candidates = [card.rarity] + [p.get("rarity", "").capitalize() for p in card.all_prints]
     rarity_enums = [Rarity.from_scryfall_str(r) for r in rarity_candidates if r]
-    if rarity_enums:
-        rarity_mse = min(rarity_enums).mse_str
-    else:
-        rarity_mse = Rarity.COMMON.mse_str
+    rarity_mse = min(rarity_enums).mse_str if rarity_enums else Rarity.COMMON.mse_str
     result["rarity"] = rarity_mse
 
-    # texte de règles
-    rule_text = build_rule_text(card.oracle_text, types)
+    # texte de règles (face principale)
+    oracle_text = card.oracle_text or (main_face.oracle_text if main_face else "")
+    rule_text = build_rule_text(oracle_text, types)
     result["rule text"] = rule_text
 
     # watermark pour terrains de base vanilla
@@ -769,25 +710,15 @@ def build_mse_card(
 
     # P/T, loyalty
     if "Creature" in types or "Vehicle" in types:
-        pt_power = None
-        pt_toughness = None
-        if card.card_faces:
-            for face in card.card_faces:
-                if face.power and face.toughness:
-                    pt_power, pt_toughness = face.power, face.toughness
-                    break
+        pt_power = main_face.power if main_face and main_face.power is not None else None
+        pt_toughness = main_face.toughness if main_face and main_face.toughness is not None else None
         if pt_power is not None:
             result["power"] = pt_power
         if pt_toughness is not None:
             result["toughness"] = pt_toughness
 
     if "Planeswalker" in types:
-        loyalty_val = None
-        if card.card_faces:
-            for face in card.card_faces:
-                if face.loyalty is not None:
-                    loyalty_val = face.loyalty
-                    break
+        loyalty_val = main_face.loyalty if main_face and main_face.loyalty is not None else None
         if loyalty_val is not None:
             result["loyalty"] = loyalty_val
 
@@ -795,7 +726,6 @@ def build_mse_card(
     result["stylesheet"] = "m15"
     set_file.stylesheets.add("m15")
 
-    # ajout de la carte au set_file
     set_file.add("card", result)
 
 
@@ -805,30 +735,26 @@ def build_rule_text(oracle_text: str, types: List[str]) -> str:
         return ""
     text_out = ""
     lines = oracle_text.replace("‘", "'").replace("’", "'").split("\n")
-    for idx_line, line in enumerate(lines):
+    for line in lines:
         if not line.strip():
             continue
         if text_out:
-            # si puce, on peut mettre soft-line
             if line.lstrip().startswith("•"):
                 text_out += "<soft-line>\n</soft-line>"
             else:
                 text_out += "\n"
-        # Remplacement des symboles {X}
         words = line.split(" ")
         first = True
         for word in words:
             if not first:
                 text_out += " "
             first = False
-            # split sur em dash pour éviter de casser les balises
             parts = word.split("\u2014")
             first_part = True
             for part in parts:
                 if not first_part:
                     text_out += "\u2014"
                 first_part = False
-                # Détection symboles { ... }
                 m = regex.fullmatch(r'(["\']?)\{(.+?)\}([:.,]?["\']*)', part)
                 if m:
                     before = m.group(1) or ""
@@ -836,7 +762,6 @@ def build_rule_text(oracle_text: str, types: List[str]) -> str:
                     after = m.group(3) or ""
                     text_out += f'{before}<sym>{cost_to_mse("{" + inner + "}")}</sym>{after}'
                 elif regex.fullmatch(r"[0-9]+|[XVI]+", part):
-                    # éviter l'interprétation automatique en symbole
                     text_out += f"</sym>{part}<sym>"
                 else:
                     text_out += part
@@ -847,7 +772,6 @@ def could_produce_from_text(card: ScryfallCard) -> Set[str]:
     """Approximation : types de mana que ce terrain peut produire, basé sur le texte."""
     result: Set[str] = set()
 
-    # Basic land types
     for basic_land_type, mana_color in BASIC_LAND_TYPES.items():
         if basic_land_type in card.type_line:
             result.add(COLOR_ABBREVIATIONS[mana_color])
@@ -879,7 +803,15 @@ def could_produce_from_text(card: ScryfallCard) -> Set[str]:
 # ---------------------------------------------------------------------------
 
 MOXFIELD_LINE_RE = re.compile(
-    r"^\s*(?P<count>\d+)\s+(?P<name>.+?)(?:\s+\([^)]+\)\s+\d+.*)?\s*$"
+    r"""
+    ^\s*
+    (?P<count>\d+)          # nombre d'exemplaires
+    \s+
+    (?P<name>[^(]+?)        # nom de carte = tout avant le premier '('
+    (?:\s+\([^)]+\).*?)?    # éventuellement: (SET) numéro flags...
+    \s*$
+    """,
+    re.VERBOSE,
 )
 
 
@@ -900,7 +832,6 @@ def parse_moxfield_file(path: str) -> List[CardEntry]:
                 continue
             m = MOXFIELD_LINE_RE.match(line)
             if not m:
-                # on tente un fallback : "<count> <name>"
                 parts = line.split(" ", 1)
                 if len(parts) == 2 and parts[0].isdigit():
                     count = int(parts[0])
@@ -910,7 +841,7 @@ def parse_moxfield_file(path: str) -> List[CardEntry]:
                 else:
                     raise ValueError(f"Ligne invalide dans {path!r} : {line!r}")
             count = int(m.group("count"))
-            name = m.group("name")
+            name = m.group("name").strip()
             entries.append(CardEntry(count=count, name=name))
     return entries
 
@@ -918,7 +849,6 @@ def parse_moxfield_file(path: str) -> List[CardEntry]:
 # ---------------------------------------------------------------------------
 # Génération du set MSE
 # ---------------------------------------------------------------------------
-
 
 def build_set_file(
     title: str,
@@ -947,7 +877,6 @@ def build_set_file(
         set_info["border color"] = border_color
     set_file["set info"] = set_info
 
-    # Styling par défaut
     set_file["styling"] = {
         "magic-m15": {
             "text box mana symbols": "magic-mana-small.mse-symbol-font",
@@ -959,11 +888,8 @@ def build_set_file(
 
 
 def finalize_set_file(set_file: MSEDataFile) -> None:
-    """Ajoute les stylesheets spécifiques rencontrés et les footers."""
-    # stylesheets spécifiques
     for stylesheet in set_file.stylesheets:
         if stylesheet == "m15":
-            # déjà défini via 'magic-m15'
             continue
         styling = {
             "text box mana symbols": "magic-mana-small.mse-symbol-font",
@@ -994,7 +920,6 @@ def write_mse_set(set_file: MSEDataFile, output_path: str) -> None:
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
-
 
 def parse_border_color(border_color: Optional[str]) -> Optional[str]:
     if border_color is None:
@@ -1105,7 +1030,6 @@ def main(argv=None):
     failed = 0
     images_to_add: List[str] = set_file.images
 
-    # Pour chaque carte (possiblement avec quantité > 1)
     for idx, entry in enumerate(entries, 1):
         if args.verbose:
             progress = min(4, 5 * idx // len(entries))
@@ -1116,9 +1040,8 @@ def main(argv=None):
                 file=sys.stderr,
                 flush=True,
             )
-        for copy_index in range(entry.count):
+        for _ in range(entry.count):
             try:
-                # On privilégie le français quand possible
                 card = fetch_card_from_scryfall(entry.name, preferred_lang="fr")
                 build_mse_card(
                     card,
