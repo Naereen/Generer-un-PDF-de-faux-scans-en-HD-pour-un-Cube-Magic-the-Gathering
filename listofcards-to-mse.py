@@ -7,22 +7,6 @@ Script Python autonome (sans Ruby) qui :
 - lit un fichier texte de type "Moxfield" (liste de cartes),
 - télécharge les données de cartes via l'API Scryfall (en essayant d'utiliser la version FR si elle existe),
 - génère un set .mse-set (zip) pour Magic Set Editor (MSE), jeu "magic", template M15.
-
-Format d'entrée attendu (exemple) :
-    1 Anafenza, the Foremost (KTK) 163 *F*
-    1 Anguished Unmaking (LTC) 265
-
-Les champs entre parenthèses (code d'édition), numéro de collector et flags (*F*, etc.)
-sont ignorés pour la recherche, seul le nom est utilisé.
-
-Limitations :
-- Ne gère que le jeu "magic" (standard),
-- Ne gère pas Planechase, Archenemy, Vanguard, etc.,
-- Ne gère pas les tokens,
-- Ne gère pas les cartes "uncards" (silver border) sauf option explicite.
-
-Installation des dépendances Python :
-$ pip install pillow piexif regex requests
 """
 
 import sys
@@ -47,6 +31,7 @@ import requests
 # ---------------------------------------------------------------------------
 
 SCRYFALL_API_NAMED = "https://api.scryfall.com/cards/named"
+SCRYFALL_API_SEARCH = "https://api.scryfall.com/cards/search"
 SCRYFALL_RATE_LIMIT_MS = 100  # recommandé par Scryfall
 
 SCRYFALL_REQUEST_TIMEOUT = datetime.datetime.now(datetime.timezone.utc)
@@ -135,6 +120,11 @@ class ScryfallCard:
     all_prints: List[Dict] = field(default_factory=list)  # printings data for min rarity
     lang: str = "en"
 
+    # Informations sur l'impression "demandée" dans la ligne Moxfield
+    original_set: Optional[str] = None
+    original_collector_number: Optional[str] = None
+    original_lang: Optional[str] = None
+
 
 def _build_scryfall_card_from_json(data: Dict) -> ScryfallCard:
     """Construit un ScryfallCard à partir du JSON brut Scryfall, en gérant les MDFC."""
@@ -162,7 +152,6 @@ def _build_scryfall_card_from_json(data: Dict) -> ScryfallCard:
     # Collecter tous les printings pour le calcul de la rareté min
     prints = []
     if data.get("prints_search_uri"):
-        # on ne gère qu'une page ; pour la rareté minimale c'est suffisant dans la plupart des cas
         prints_resp = scryfall_request(data["prints_search_uri"])
         prints = prints_resp.json().get("data", [])
 
@@ -186,68 +175,102 @@ def _build_scryfall_card_from_json(data: Dict) -> ScryfallCard:
     )
 
 
-def fetch_card_from_scryfall_raw(name: str) -> ScryfallCard:
-    """Récupère une carte Scryfall (langue par défaut, 'named?exact=')."""
+def fetch_card_from_scryfall_raw_by_name(name: str) -> ScryfallCard:
+    """Récupère une carte Scryfall par nom (langue par défaut, 'named?exact=')."""
     resp = scryfall_request(SCRYFALL_API_NAMED, params={"exact": name})
     data = resp.json()
     return _build_scryfall_card_from_json(data)
 
 
-def fetch_card_from_scryfall(name: str, preferred_lang: str = "fr") -> ScryfallCard:
-    """
-    Récupère une carte depuis Scryfall, en préférant une impression dans la langue donnée
-    (par exemple 'fr') si elle existe pour la même combinaison (set, collector_number).
-    """
-    # Étape 1 : impression de référence (souvent en anglais)
-    base = fetch_card_from_scryfall_raw(name)
-    base_set = base.set.lower()
-    base_num = base.collector_number
+def _search_one_card(query: str) -> Optional[Dict]:
+    """Retourne le premier résultat JSON pour une requête de recherche Scryfall (ou None)."""
+    resp = scryfall_request(SCRYFALL_API_SEARCH, params={"q": query})
+    data = resp.json()
+    results = data.get("data", [])
+    if not results:
+        return None
+    return results[0]
 
-    # Si pas de set/numéro ou pas de langue préférée, on ne peut pas cibler une impression précise
-    if not base_set or not base_num or not preferred_lang:
-        return base
 
-    # Étape 2 : chercher une version dans la langue préférée
-    query = f"set:{base_set} number:{base_num} lang:{preferred_lang}"
-    search_url = "https://api.scryfall.com/cards/search"
+def fetch_printing(set_code: Optional[str],
+                   collector_number: Optional[str],
+                   name: str,
+                   preferred_lang: str = "fr") -> ScryfallCard:
+    """
+    Récupère une carte en préférant :
+    1. L'impression set/number en preferred_lang,
+    2. Sinon l'impression set/number en anglais,
+    3. Sinon une impression FR (toutes éditions) par nom,
+    4. Sinon une impression EN par nom.
+    """
+    original_set = set_code.upper() if set_code else None
+    original_num = collector_number
+    original_lang = preferred_lang
+
+    # Helper pour construire un ScryfallCard + renseigner original_*
+    def make_card_from_data(data: Dict) -> ScryfallCard:
+        card = _build_scryfall_card_from_json(data)
+        card.original_set = original_set
+        card.original_collector_number = original_num
+        card.original_lang = original_lang
+        return card
+
+    # 1. Impression exacte set/number en FR puis EN
+    if set_code and collector_number:
+        set_q = set_code.lower()
+        num_q = collector_number
+
+        # FR
+        try:
+            q = f"set:{set_q} number:{num_q} lang:{preferred_lang}"
+            data = _search_one_card(q)
+            if data is not None:
+                return make_card_from_data(data)
+        except requests.HTTPError:
+            pass
+
+        # EN
+        try:
+            q = f"set:{set_q} number:{num_q} lang:en"
+            data = _search_one_card(q)
+            if data is not None:
+                card = make_card_from_data(data)
+                card.lang = data.get("lang", "en")
+                return card
+        except requests.HTTPError:
+            pass
+
+    # 2. Toute édition FR par nom exact
     try:
-        resp = scryfall_request(search_url, params={"q": query})
-        search_data = resp.json()
-        data_list = search_data.get("data", [])
-        fr_data = None
-        for d in data_list:
-            if d.get("lang") == preferred_lang:
-                fr_data = d
-                break
-        if not fr_data:
-            return base  # pas d’impression FR : on garde la VO
-
-        fr_card = _build_scryfall_card_from_json(fr_data)
-
-        # Fusion prudente : si certains champs sont vides en FR, on reprend ceux de base
-        if not fr_card.colors:
-            fr_card.colors = base.colors
-        if not fr_card.color_identity:
-            fr_card.color_identity = base.color_identity
-        if not fr_card.type_line:
-            fr_card.type_line = base.type_line
-        if not fr_card.oracle_text:
-            fr_card.oracle_text = base.oracle_text
-        if not fr_card.mana_cost:
-            fr_card.mana_cost = base.mana_cost
-        if not fr_card.image_uris and base.image_uris:
-            fr_card.image_uris = base.image_uris
-        if not fr_card.card_faces and base.card_faces:
-            fr_card.card_faces = base.card_faces
-
-        # Recalcul des prints pour la rareté minimal, sinon on reprend ceux de base
-        if not fr_card.all_prints and base.all_prints:
-            fr_card.all_prints = base.all_prints
-
-        return fr_card
+        q = f'!"{name}" lang:{preferred_lang}'
+        data = _search_one_card(q)
+        if data is not None:
+            card = make_card_from_data(data)
+            card.lang = data.get("lang", preferred_lang)
+            return card
     except requests.HTTPError:
-        # En cas de problème lors de la recherche FR, on garde la version de base
-        return base
+        pass
+
+    # 3. Toute édition EN par nom exact
+    try:
+        q = f'!"{name}" lang:en'
+        data = _search_one_card(q)
+        if data is not None:
+            card = make_card_from_data(data)
+            card.lang = data.get("lang", "en")
+            return card
+    except requests.HTTPError:
+        pass
+
+    # 4. Fallback ultime : named?exact=Nom (langue par défaut)
+    try:
+        card = fetch_card_from_scryfall_raw_by_name(name)
+        card.original_set = original_set
+        card.original_collector_number = original_num
+        card.original_lang = original_lang
+        return card
+    except requests.HTTPError as e:
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -525,12 +548,14 @@ class MSEDataFile:
 # Conversion Scryfall -> MSE card
 # ---------------------------------------------------------------------------
 
-def normalize_image_name(card_name: str) -> str:
-    return card_name.replace(":", "").replace('"', "").replace("?", "")
+def normalize_image_name(card: ScryfallCard) -> str:
+    # on base le nom de fichier sur set / collector_number / langue
+    base = f"{card.set.lower()}_{card.collector_number or 'no-num'}_{card.lang}"
+    return base.replace(":", "").replace('"', "").replace("?", "")
 
 
 def save_card_art(card: ScryfallCard, images_dir: Optional[str]) -> Tuple[Optional[str], bool, Optional[str]]:
-    """Télécharge l'illustration de la carte (art_crop si possible)."""
+    """Télécharge l'illustration de la carte (art_crop si possible), avec cache."""
     if images_dir is None:
         return None, False, card.artist
 
@@ -540,13 +565,25 @@ def save_card_art(card: ScryfallCard, images_dir: Optional[str]) -> Tuple[Option
     if card.image_uris:
         img_url = card.image_uris.get("art_crop") or card.image_uris.get("normal") or card.image_uris.get("large")
 
+    image_filename = f"{normalize_image_name(card)}.jpg"
+    image_path = os.path.join(images_dir, image_filename)
+
+    if os.path.exists(image_path):
+        # Utilisation du cache
+        try:
+            with PIL.Image.open(image_path) as img:
+                image_is_vertical = img.size[1] > img.size[0]
+            return image_path, image_is_vertical, card.artist
+        except OSError:
+            # Fichier corrompu, on retente le téléchargement
+            pass
+
     if not img_url:
         return None, False, card.artist
 
     response = scryfall_request(img_url)
     data = response.content
 
-    image_path = os.path.join(images_dir, f"{normalize_image_name(card.name)}.jpg")
     with PIL.Image.open(io.BytesIO(data)) as img:
         image_is_vertical = img.size[1] > img.size[0]
         exif = piexif.load(img.info.get("exif", piexif.dump({})))
@@ -601,6 +638,26 @@ def build_mse_card(
         images_to_add.append(image_path)
     if artist:
         result["illustrator"] = artist
+
+    # note sur l'impression utilisée / demandée
+    note_parts = []
+    if card.original_set or card.original_collector_number or card.original_lang:
+        req_set = card.original_set or card.set
+        req_num = card.original_collector_number or card.collector_number or "?"
+        req_lang = card.original_lang or "?"
+        used_set = card.set
+        used_num = card.collector_number or "?"
+        used_lang = card.lang
+
+        requested_str = f"{req_set}/{req_num}/{req_lang}"
+        used_str = f"{used_set}/{used_num}/{used_lang}"
+
+        if (req_set, req_num, req_lang) == (used_set, used_num, used_lang):
+            note_parts.append(f"printing {used_lang}: {used_str}")
+        else:
+            note_parts.append(f"requested: {requested_str} ; used: {used_str}")
+    if note_parts:
+        result["note"] = " | ".join(note_parts)
 
     # couleurs / frame color & indicator (basé sur card.colors)
     frame_color_parts: List[str] = []
@@ -808,7 +865,10 @@ MOXFIELD_LINE_RE = re.compile(
     (?P<count>\d+)          # nombre d'exemplaires
     \s+
     (?P<name>[^(]+?)        # nom de carte = tout avant le premier '('
-    (?:\s+\([^)]+\).*?)?    # éventuellement: (SET) numéro flags...
+    (?:\s+\((?P<set>[^)]+)\)   # code de set entre parenthèses
+        (?:\s+(?P<cn>[^ ]+))?  # collector number éventuel
+        .*?
+    )?
     \s*$
     """,
     re.VERBOSE,
@@ -819,6 +879,8 @@ MOXFIELD_LINE_RE = re.compile(
 class CardEntry:
     count: int
     name: str
+    set_code: Optional[str] = None
+    collector_number: Optional[str] = None
 
 
 def parse_moxfield_file(path: str) -> List[CardEntry]:
@@ -842,7 +904,13 @@ def parse_moxfield_file(path: str) -> List[CardEntry]:
                     raise ValueError(f"Ligne invalide dans {path!r} : {line!r}")
             count = int(m.group("count"))
             name = m.group("name").strip()
-            entries.append(CardEntry(count=count, name=name))
+            set_code = m.group("set")
+            cn = m.group("cn")
+            if set_code:
+                set_code = set_code.strip().upper()
+            if cn:
+                cn = cn.strip()
+            entries.append(CardEntry(count=count, name=name, set_code=set_code, collector_number=cn))
     return entries
 
 
@@ -867,7 +935,7 @@ def build_set_file(
         "copyright": copyright_text,
         "description": "Cards automatically imported from Scryfall using listofcards-to-mse.",
         "set code": set_code,
-        "set language": "EN",
+        "set language": "FR",  # tu veux tout en français autant que possible
         "mark errors": "no",
         "automatic reminder text": "",
         "automatic card numbers": "yes" if auto_card_numbers else "no",
@@ -1042,7 +1110,7 @@ def main(argv=None):
             )
         for _ in range(entry.count):
             try:
-                card = fetch_card_from_scryfall(entry.name, preferred_lang="fr")
+                card = fetch_printing(entry.set_code, entry.collector_number, entry.name, preferred_lang="fr")
                 build_mse_card(
                     card,
                     set_file,
