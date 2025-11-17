@@ -1,0 +1,45 @@
+1 Abrupt Decay (PRM) 59681 *F*
+1 Anafenza, the Foremost (KTK) 163
+1 Anguished Unmaking (LTC) 265
+1 Arwen, Mortal Queen (LTR) 644
+1 Atraxa, Grand Unifier (ONE) 316
+1 Badlands (OLGC) 2016NA
+1 Bhujerba, Floating City (SCH) 41 *F*
+1 Blightsteel Colossus (MBS) 99
+1 Bloodbraid Elf (M3C) 256
+1 Brokers Charm (SNC) 298
+1 Celes, Rune Knight (FIC) 201
+1 Chandra, Torch of Defiance (SS3) 1
+1 Channel (IMA) 157
+1 Dack Fayden (MED) RA6 *F*
+1 Demonic Tutor (G08) 3 *F*
+1 Elspeth, Sun's Champion (SLD) 1140
+1 Ertai Resurrected (DMU) 298
+1 Farewell (NEO) 365
+1 Fireball (PARL) 7
+1 Flare of Denial (MH3) 326
+1 Henneth Annûn (LTC) 373
+1 Jace, the Mind Sculptor (BLC) 75
+1 Jeskai Ascendancy (KTK) 180
+1 Korvold, Fae-Cursed King (ELD) 329
+1 Kroxa, Titan of Death's Hunger (SLD) 225
+1 Legolas's Quick Reflexes (LTC) 537 *F*
+1 Merciless Poisoning (SLD) 1860
+1 Misdirection (CNS) 102
+1 Muldrotha, the Gravetide (FDN) 243
+1 Mystic Snake (SPG) 35
+1 Naya Charm (ZNC) 95
+1 Nicol Bolas, the Ravager / Nicol Bolas, the Arisen (M19) 218
+1 Phelia, Exuberant Shepherd (MH3) 364
+1 Phlage, Titan of Fire's Fury (MH3) 379
+1 Polluted Delta (ONS) 321
+1 Redirect Lightning (TLA) 151
+1 Sheoldred, the Apocalypse (DMU) 369
+1 Shorikai, Genesis Engine (SLD) 1880
+1 Starting Town (FIN) 289
+1 Sword of Feast and Famine (ACR) 99
+1 Sword of Fire and Ice (DST) 148
+1 Temur Ascendancy (TDC) 305
+1 The Celestial Toymaker (SLD) 1582
+1 Umezawa's Jitte (BOK) 163
+1 Wilson, Refined Grizzly (CLB) 411

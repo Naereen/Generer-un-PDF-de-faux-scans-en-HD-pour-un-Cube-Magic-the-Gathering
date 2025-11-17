@@ -1,5 +1,4 @@
+pillow
+piexif
+regex
 requests
-Pillow
-reportlab
-click
-mtgrender

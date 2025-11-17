@@ -52,7 +52,7 @@ import requests
 SCRYFALL_API_NAMED = "https://api.scryfall.com/cards/named"
 SCRYFALL_RATE_LIMIT_MS = 100  # recommandé par Scryfall
 
-SCRYFALL_REQUEST_TIMEOUT = datetime.datetime.utcnow()
+SCRYFALL_REQUEST_TIMEOUT = datetime.datetime.now(datetime.timezone.utc)
 
 BASIC_LAND_TYPES = {
     'Plains': 'W',
@@ -95,11 +95,11 @@ def scryfall_request(url: str, *, params: Optional[Dict] = None) -> requests.Res
     """Appelle Scryfall en respectant un rate-limit simple global."""
     global SCRYFALL_REQUEST_TIMEOUT
 
-    sleep_secs = (SCRYFALL_REQUEST_TIMEOUT - datetime.datetime.utcnow()).total_seconds()
+    sleep_secs = (SCRYFALL_REQUEST_TIMEOUT - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
     if sleep_secs > 0:
         time.sleep(sleep_secs)
     response = requests.get(url, params=params)
-    SCRYFALL_REQUEST_TIMEOUT = datetime.datetime.utcnow() + datetime.timedelta(
+    SCRYFALL_REQUEST_TIMEOUT = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
         milliseconds=SCRYFALL_RATE_LIMIT_MS
     )
     response.raise_for_status()
