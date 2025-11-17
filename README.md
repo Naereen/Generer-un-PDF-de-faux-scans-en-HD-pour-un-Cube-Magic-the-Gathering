@@ -1,4 +1,4 @@
-# [Work in Progress] Script local en Python, pour générer un PDF prêt à être imprimé, de faux scans en HD pour un Cube Magic the Gathering via MTGRender.tk, Scryfall.com et Moxfield.com
+# [Work in Progress] Petit script local en Python, pour générer un PDF prêt à être imprimé, de faux scans Version Français, en HD pour un Cube Magic the Gathering via MTGProxyPrinter, Scryfall et Moxfield. Le Challenge, c'est de générer à la volée de "faux scans" en français, pour les cartes qui n'ont pas de version française (avec MagicSetEditor) !
 
 Ce README.md a été pré-généré par IA (Google's Gemini, GitHub's Copilot et OpenAI's ChatGPT), et sera complété plus tard.
 
@@ -342,4 +342,5 @@ Projet libre d'utilisation personnelle non-commerciale
 * **MTGRender** (Senryoku) pour un outil formidable
 * **Moxfield** pour une API fiable
 * **ReportLab** pour du PDF pro
+
 
